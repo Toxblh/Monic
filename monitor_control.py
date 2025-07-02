@@ -18,7 +18,7 @@ from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal, QRectF
 # Константы анимации
 TARGET_ANIMATION_DURATION_MS = 400  # Целевая длительность анимации
 ANIMATION_TOLERANCE_MS = 200        # Допустимое отклонение (±200ms)
-MIN_ANIMATION_STEPS = 5             # Минимальное количество шагов
+MIN_ANIMATION_STEPS = 20            # Минимальное количество шагов
 MAX_ANIMATION_STEPS = 80            # Максимальное количество шагов
 DEFAULT_ANIMATION_STEPS = 40        # Начальное количество шагов
 UPDATE_INTERVAL_MS = 10000          # Интервал обновления информации о яркости (10 секунд)
