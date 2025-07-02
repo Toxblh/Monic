@@ -42,6 +42,29 @@
 - **Монитор**: Поддержка DDC/CI протокола
 - **Системный трей**: GNOME, KDE, или другая DE с поддержкой system tray
 
+## Быстрый старт на Alt Linux 
+
+```
+git clone https://github.com/toxblh/Monic.git
+cd Monic
+./install.sh
+
+# Ставим pip
+sudo apt-get install pip
+
+# И выдаём доступ на усправление шиной i2c
+sudo mkdir -p /etc/modules-load.d; echo i2c-dev | sudo tee /etc/modules-load.d/i2c-dev.conf
+sudo groupadd i2c
+sudo chown :i2c /dev/i2c-*
+sudo usermod -aG i2c $USER
+echo 'KERNEL=="i2c-[0-9]*", GROUP="i2c"' | sudo tee -a /etc/udev/rules.d/10-i2c.rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+
+# Первый запуск с консоли (долгий), далее можно из меню приложений
+~/.local/share/monitor-control/run_monitor_control.sh
+```
+
 ## 🛠️ Установка
 
 ### 1. Клонирование репозитория
