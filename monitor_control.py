@@ -8,6 +8,7 @@ import os
 import traceback
 import threading
 import time
+import json
 from PyQt6.QtWidgets import (
     QApplication, QSystemTrayIcon, QMenu
 )
@@ -15,10 +16,15 @@ from PyQt6.QtGui import QIcon, QPixmap, QPainter, QBrush, QPen, QLinearGradient,
 from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal, QRectF
 
 # Константы анимации
-ANIMATION_DURATION_MS = 400  # Длительность анимации в миллисекундах
-ANIMATION_STEPS = 40         # Количество шагов анимации
-STEP_DELAY_MS = ANIMATION_DURATION_MS // ANIMATION_STEPS
-UPDATE_INTERVAL_MS = 10000    # Интервал обновления информации о яркости (10 секунд)
+TARGET_ANIMATION_DURATION_MS = 400  # Целевая длительность анимации
+ANIMATION_TOLERANCE_MS = 200        # Допустимое отклонение (±200ms)
+MIN_ANIMATION_STEPS = 5             # Минимальное количество шагов
+MAX_ANIMATION_STEPS = 80            # Максимальное количество шагов
+DEFAULT_ANIMATION_STEPS = 40        # Начальное количество шагов
+UPDATE_INTERVAL_MS = 10000          # Интервал обновления информации о яркости (10 секунд)
+
+# Путь для сохранения настроек адаптивной анимации
+SETTINGS_FILE = os.path.expanduser("~/.monitor_control_settings.json")
 
 def create_monitor_icon():
     """Создает красивую иконку монитора с градиентами"""
@@ -271,7 +277,7 @@ class UIUpdater(QObject):
         self.update_display.emit()
     
 class BrightnessAnimator:
-    """Класс для плавной анимации изменения яркости"""
+    """Класс для плавной анимации изменения яркости с адаптивным timing'ом"""
     
     def __init__(self, monitor, monitor_name: str, ui_updater=None):
         self.monitor = monitor
@@ -282,6 +288,76 @@ class BrightnessAnimator:
         self.lock = threading.Lock()
         self.ui_updater = ui_updater  # Объект для отправки сигналов
         
+        # Адаптивные параметры анимации
+        self.optimal_steps = DEFAULT_ANIMATION_STEPS
+        self.performance_history = []  # История производительности
+        self.last_step_duration_ms = 10  # Средняя длительность одного шага в мс
+        
+        # Загружаем сохраненные настройки
+        self._load_settings()
+        
+    def _load_settings(self):
+        """Загружает сохраненные настройки производительности"""
+        try:
+            if os.path.exists(SETTINGS_FILE):
+                with open(SETTINGS_FILE, 'r') as f:
+                    settings = json.load(f)
+                    monitor_settings = settings.get(self.monitor_name, {})
+                    if monitor_settings:
+                        self.optimal_steps = monitor_settings.get('optimal_steps', DEFAULT_ANIMATION_STEPS)
+                        self.performance_history = monitor_settings.get('performance_history', [])[:3]  # Берем только последние 3
+                        print(f"📂 Загружены настройки для {self.monitor_name}: {self.optimal_steps} шагов, история: {self.performance_history}")
+        except Exception as e:
+            print(f"⚠️  Ошибка загрузки настроек: {e}")
+            
+    def _save_settings(self):
+        """Сохраняет текущие настройки производительности"""
+        try:
+            settings = {}
+            if os.path.exists(SETTINGS_FILE):
+                with open(SETTINGS_FILE, 'r') as f:
+                    settings = json.load(f)
+            
+            settings[self.monitor_name] = {
+                'optimal_steps': self.optimal_steps,
+                'performance_history': self.performance_history[-3:]  # Сохраняем только последние 3
+            }
+            
+            with open(SETTINGS_FILE, 'w') as f:
+                json.dump(settings, f, indent=2)
+            print(f"💾 Настройки сохранены для {self.monitor_name}")
+        except Exception as e:
+            print(f"⚠️  Ошибка сохранения настроек: {e}")
+        
+    def _calculate_optimal_steps(self, distance):
+        """Вычисляет оптимальное количество шагов на основе истории производительности"""
+        if len(self.performance_history) < 2:
+            print(f"📈 Недостаточно данных для адаптации, используем {self.optimal_steps} шагов")
+            return self.optimal_steps
+        
+        # Берем среднее время за последние 3 анимации
+        recent_times = self.performance_history[-3:]
+        avg_duration = sum(recent_times) / len(recent_times)
+        
+        print(f"📊 Анализ производительности: среднее время {avg_duration:.1f}ms, цель {TARGET_ANIMATION_DURATION_MS}ms")
+        
+        # Если анимация слишком медленная, уменьшаем количество шагов
+        if avg_duration > TARGET_ANIMATION_DURATION_MS + ANIMATION_TOLERANCE_MS:
+            new_steps = max(MIN_ANIMATION_STEPS, int(self.optimal_steps * 0.75))
+            print(f"⚡ Уменьшаем шаги: {self.optimal_steps} → {new_steps} (медленно: {avg_duration:.1f}ms > {TARGET_ANIMATION_DURATION_MS + ANIMATION_TOLERANCE_MS}ms)")
+            self.optimal_steps = new_steps
+            self._save_settings()  # Сохраняем изменения
+        # Если анимация слишком быстрая, увеличиваем количество шагов
+        elif avg_duration < TARGET_ANIMATION_DURATION_MS - ANIMATION_TOLERANCE_MS:
+            new_steps = min(MAX_ANIMATION_STEPS, int(self.optimal_steps * 1.25))
+            print(f"⚡ Увеличиваем шаги: {self.optimal_steps} → {new_steps} (быстро: {avg_duration:.1f}ms < {TARGET_ANIMATION_DURATION_MS - ANIMATION_TOLERANCE_MS}ms)")
+            self.optimal_steps = new_steps
+            self._save_settings()  # Сохраняем изменения
+        else:
+            print(f"✅ Производительность в норме: {avg_duration:.1f}ms, оставляем {self.optimal_steps} шагов")
+        
+        return self.optimal_steps
+        
     def set_target(self, value: int):
         """Устанавливает новое целевое значение яркости"""
         with self.lock:
@@ -291,8 +367,12 @@ class BrightnessAnimator:
             if not self.is_animating:
                 try:
                     with self.monitor:
-                        self.current_value = self.monitor.get_luminance()
-                        print(f"📊 Текущая яркость: {self.current_value}%")
+                        current_brightness = self.monitor.get_luminance()
+                        if current_brightness is not None:
+                            self.current_value = current_brightness
+                            print(f"📊 Текущая яркость: {self.current_value}%")
+                        else:
+                            print(f"⚠️  Яркость не получена (None), используем значение по умолчанию: {self.current_value}%")
                 except Exception as e:
                     print(f"⚠️  Ошибка получения яркости: {e}")
                     self.current_value = 50
@@ -303,7 +383,7 @@ class BrightnessAnimator:
                 thread.start()
     
     def _animate(self):
-        """Основной цикл анимации"""
+        """Основной цикл анимации с адаптивным timing'ом"""
         import time as time_module
         
         animation_start_time = time_module.time()
@@ -311,6 +391,13 @@ class BrightnessAnimator:
         
         # Запоминаем начальное значение и вычисляем общее расстояние
         start_value = self.current_value
+        
+        # Проверяем, что start_value не None
+        if start_value is None:
+            print(f"⚠️  Начальное значение яркости None, используем 50%")
+            start_value = 50
+            self.current_value = 50
+        
         total_distance = abs(self.target_value - start_value)
         
         # Если расстояние 0, то анимация не нужна
@@ -319,40 +406,60 @@ class BrightnessAnimator:
             print(f"✅ Анимация не требуется: уже {self.current_value}%")
             return
         
+        # Вычисляем оптимальное количество шагов
+        animation_steps = self._calculate_optimal_steps(total_distance)
+        step_delay_ms = TARGET_ANIMATION_DURATION_MS / animation_steps
+        
         print(f"📏 Расстояние анимации: {start_value}% → {self.target_value}% (Δ={total_distance})")
-        print(f"⏱️  Планируемая длительность: {ANIMATION_DURATION_MS}ms ({ANIMATION_STEPS} шагов по {STEP_DELAY_MS}ms)")
+        print(f"⚡ Адаптивные параметры: {animation_steps} шагов по {step_delay_ms:.1f}ms")
+        print(f"🎯 Целевая длительность: {TARGET_ANIMATION_DURATION_MS}ms (±{ANIMATION_TOLERANCE_MS}ms)")
         
         step_count = 0
-        while self.is_animating and step_count < ANIMATION_STEPS:
+        while self.is_animating and step_count < animation_steps:
             with self.lock:
                 step_count += 1
                 
                 # Вычисляем прогресс от 0.0 до 1.0
-                progress = step_count / ANIMATION_STEPS
+                progress = step_count / animation_steps
                 
                 # Интерполируем между начальным и целевым значением
                 interpolated_value = start_value + (self.target_value - start_value) * progress
                 self.current_value = round(interpolated_value)
                 
                 # На последнем шаге точно устанавливаем целевое значение
-                if step_count >= ANIMATION_STEPS:
+                if step_count >= animation_steps:
                     self.current_value = self.target_value
                     self.is_animating = False
                     
                     animation_end_time = time_module.time()
                     actual_duration = (animation_end_time - animation_start_time) * 1000
+                    
+                    # Сохраняем результат в историю производительности
+                    self.performance_history.append(actual_duration)
+                    if len(self.performance_history) > 5:  # Храним только последние 5 результатов
+                        self.performance_history.pop(0)
+                    
+                    # Сохраняем настройки после каждой анимации
+                    self._save_settings()
+                    
                     print(f"✅ Анимация завершена: {self.current_value}% за {actual_duration:.1f}ms")
+                    print(f"📊 История производительности: {[f'{t:.0f}ms' for t in self.performance_history[-3:]]}")
                     
                     if self.ui_updater:
                         self.ui_updater.request_update()
                 
                 try:
+                    # Проверяем, что current_value не None перед установкой
+                    if self.current_value is None:
+                        print(f"⚠️  current_value is None, устанавливаем значение по умолчанию")
+                        self.current_value = self.target_value
+                    
                     with self.monitor:
                         self.monitor.set_luminance(self.current_value)
-                        print(f"🔆 Яркость установлена: {self.current_value}% (шаг {step_count}/{ANIMATION_STEPS})")
+                        print(f"🔆 Яркость установлена: {self.current_value}% (шаг {step_count}/{animation_steps})")
                         
                         # Обновляем иконку каждые несколько шагов или на последнем шаге
-                        if step_count % 8 == 0 or step_count >= ANIMATION_STEPS:
+                        if step_count % max(1, animation_steps // 5) == 0 or step_count >= animation_steps:
                             update_tray_icon_brightness(self.current_value)
                         
                 except Exception as e:
@@ -362,7 +469,7 @@ class BrightnessAnimator:
                     
             # Если анимация ещё продолжается, ждём до следующего шага
             if self.is_animating:
-                time.sleep(STEP_DELAY_MS / 1000.0)
+                time.sleep(step_delay_ms / 1000.0)
 
 def scan_monitors():
     """Сканирует мониторы (импорт ВНУТРИ функции)"""
@@ -575,9 +682,11 @@ def create_monitor_menus(menu, monitors):
                     
                 # Создаем аниматор для этого монитора
                 if i >= len(animators):
+                    # Используем более точное имя для сохранения настроек
+                    animator_name = model_name if model_name else f"Монитор {i + 1}"
                     animator = BrightnessAnimator(
                         monitor, 
-                        f"Монитор {i + 1}",
+                        animator_name,
                         ui_updater_global
                     )
                     animators.append(animator)
@@ -752,7 +861,9 @@ def main():
     print()
     print("✅ Приложение запущено успешно!")
     print("📍 Проверьте системный трей для управления мониторами")
-    print("🎬 Включена плавная анимация изменения яркости")
+    print("🎬 Включена адаптивная анимация изменения яркости")
+    print(f"🎯 Целевое время анимации: {TARGET_ANIMATION_DURATION_MS}ms ±{ANIMATION_TOLERANCE_MS}ms")
+    print(f"⚙️  Диапазон шагов: {MIN_ANIMATION_STEPS}-{MAX_ANIMATION_STEPS} (начальное: {DEFAULT_ANIMATION_STEPS})")
     print("🔄 Включено автоматическое обновление меню")
     print("🛑 Для выхода используйте меню в трее или нажмите Ctrl+C")
     print()
