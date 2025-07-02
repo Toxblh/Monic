@@ -1,0 +1,3 @@
+monitorcontrol>=3.0.0
+PyQt6>=6.5.0
+setuptools>=65.0.0
