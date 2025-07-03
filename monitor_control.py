@@ -257,6 +257,7 @@ def create_dynamic_monitor_icon(brightness_level=None):
 class UIUpdater(QObject):
     """Класс для безопасного обновления UI из других потоков"""
     update_display = pyqtSignal()
+    update_icon = pyqtSignal(int)
     
     def __init__(self):
         super().__init__()
@@ -459,8 +460,8 @@ class BrightnessAnimator:
                         print(f"🔆 Яркость установлена: {self.current_value}% (шаг {step_count}/{animation_steps})")
                         
                         # Обновляем иконку каждые несколько шагов или на последнем шаге
-                        if step_count % max(1, animation_steps // 5) == 0 or step_count >= animation_steps:
-                            update_tray_icon_brightness(self.current_value)
+                        if self.ui_updater and (step_count % max(1, animation_steps // 5) == 0 or step_count >= animation_steps):
+                            self.ui_updater.update_icon.emit(self.current_value)
                         
                 except Exception as e:
                     print(f"❌ Ошибка установки яркости: {e}")
@@ -788,6 +789,7 @@ def main():
     # Создаем UI updater для безопасного обновления из потоков
     ui_updater_global = UIUpdater()
     ui_updater_global.update_display.connect(update_brightness_display)
+    ui_updater_global.update_icon.connect(update_tray_icon_brightness)
     
     if not QSystemTrayIcon.isSystemTrayAvailable():
         print("❌ Ошибка: System tray недоступен")
