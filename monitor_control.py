@@ -494,6 +494,7 @@ update_timer = None
 tray_icon_global = None
 monitors_global = []
 ui_updater_global = None
+g_menu_items = {} # Глобальный словарь для хранения элементов меню
 
 def refresh_monitors(tray_icon):
     """Обновляет список мониторов"""
@@ -502,13 +503,18 @@ def refresh_monitors(tray_icon):
     print("✅ Мониторы обновлены")
 
 def update_brightness_display():
-    """Обновляет отображение текущей яркости в меню"""
-    global tray_icon_global, monitors_global
+    """Обновляет отображение текущей яркости в меню (только текст)"""
+    global monitors_global, g_menu_items, animators
     
+    # Не обновляем меню, если идет анимация, чтобы избежать гонки состояний
+    if any(anim.is_animating for anim in animators):
+        print("🔄 Пропускаем обновление меню, идет анимация.")
+        return
+        
     if not tray_icon_global or not monitors_global:
         return
         
-    print("🔄 Обновляем отображение яркости...")
+    print("🔄 Обновляем отображение яркости в меню...")
     
     # Получаем среднюю яркость всех мониторов для иконки
     total_brightness = 0
@@ -521,46 +527,56 @@ def update_brightness_display():
                 if brightness is not None:
                     total_brightness += brightness
                     monitor_count += 1
-        except:
+        except Exception:
             pass
     
-    # Обновляем иконку с средней яркостью
+    # Обновляем иконку со средней яркостью
     if monitor_count > 0:
         avg_brightness = total_brightness // monitor_count
         update_tray_icon_brightness(avg_brightness)
     
-    # Пересоздаем меню с обновленными значениями
-    menu = QMenu()
-    menu.setStyleSheet("""
-        QMenu {
-            background-color: #ffffff;
-            border: 1px solid #bdc3c7;
-            border-radius: 6px;
-            padding: 5px;
-        }
-        QMenu::item {
-            padding: 5px 10px;
-            border-radius: 4px;
-        }
-        QMenu::item:selected {
-            background-color: #3498db;
-            color: white;
-        }
-    """)
-    
-    # Добавляем мониторы с обновленной яркостью
-    create_monitor_menus(menu, monitors_global)
-    
-    # Служебные функции
-    menu.addSeparator()
-    
-    refresh_action = menu.addAction("🔄 Обновить мониторы")
-    refresh_action.triggered.connect(lambda: refresh_monitors(tray_icon_global))
-    
-    quit_action = menu.addAction("❌ Выход")
-    quit_action.triggered.connect(QApplication.instance().quit)
-    
-    tray_icon_global.setContextMenu(menu)
+    # Обновляем текст существующих элементов меню
+    for i, monitor in enumerate(monitors_global):
+        monitor_key = f"monitor_{i}"
+        if monitor_key not in g_menu_items:
+            continue
+
+        try:
+            # Получаем актуальные данные
+            with monitor:
+                current_brightness = monitor.get_luminance()
+                if current_brightness is None:
+                    current_brightness = "?"
+            
+            current_input, _, model_name = get_monitor_capabilities(monitor, i)
+            monitor_name = model_name if model_name else f"Монитор {i + 1}"
+            
+            # Обновляем заголовок
+            header_action = g_menu_items[monitor_key].get("header")
+            if header_action:
+                header_action.setText(f"📺 {monitor_name} (🔆 {current_brightness}%)")
+            
+            # Обновляем информацию о входе
+            input_info_action = g_menu_items[monitor_key].get("input_info")
+            if input_info_action:
+                if current_input is not None:
+                    input_info_action.setText(f"   🔌 Текущий: {get_input_name(current_input)}")
+                    input_info_action.setVisible(True)
+                else:
+                    input_info_action.setVisible(False)
+            
+            # Обновляем маркеры текущего входа
+            input_actions = g_menu_items[monitor_key].get("inputs", {})
+            for code, action in input_actions.items():
+                input_name = get_input_name(code)
+                current_marker = " ◀" if code == current_input else ""
+                action.setText(f"     ▸ {input_name}{current_marker}")
+
+        except Exception as e:
+            print(f"❌ Ошибка обновления меню для монитора {i + 1}: {e}")
+            header_action = g_menu_items[monitor_key].get("header")
+            if header_action:
+                header_action.setText(f"❌ Монитор {i + 1}: Ошибка")
 
 def get_monitor_capabilities(monitor, monitor_index):
     """Получает возможности монитора, включая доступные входы и модель"""
@@ -570,7 +586,7 @@ def get_monitor_capabilities(monitor, monitor_index):
             try:
                 current_input = monitor.get_input_source()
                 print(f"📍 Монитор {monitor_index + 1} - текущий вход: {current_input}")
-            except:
+            except Exception:
                 current_input = None
                 
             # Получаем возможности монитора включая модель
@@ -594,7 +610,7 @@ def get_monitor_capabilities(monitor, monitor_index):
                     # Стандартные входы если не удалось получить
                     available_inputs = [15, 17, 18]  # DP1, HDMI1, HDMI2
                     print(f"📋 Монитор {monitor_index + 1} - используем стандартные входы")
-            except:
+            except Exception:
                 available_inputs = [15, 17, 18]  # DP1, HDMI1, HDMI2
                 model_name = None
                 print(f"📋 Монитор {monitor_index + 1} - ошибка получения входов, используем стандартные")
@@ -615,11 +631,14 @@ def get_input_name(input_code):
     return input_names.get(input_code, f"Вход {input_code}")
 
 def create_monitor_menus(menu, monitors):
-    """Создает плоскую структуру меню для мониторов"""
-    global animators, ui_updater_global
+    """Создает плоскую структуру меню для мониторов и сохраняет ссылки на элементы"""
+    global animators, ui_updater_global, g_menu_items
     
     if monitors:
         for i, monitor in enumerate(monitors):
+            monitor_key = f"monitor_{i}"
+            g_menu_items[monitor_key] = {}
+            
             try:
                 # Получаем текущую яркость
                 try:
@@ -627,37 +646,31 @@ def create_monitor_menus(menu, monitors):
                         current_brightness = monitor.get_luminance()
                         if current_brightness is None:
                             current_brightness = 50
-                except:
+                except Exception:
                     current_brightness = 50
                 
                 # Получаем возможности монитора
                 current_input, available_inputs, model_name = get_monitor_capabilities(monitor, i)
                 
                 # Формируем название монитора
-                if model_name:
-                    monitor_name = model_name
-                else:
-                    monitor_name = f"Монитор {i + 1}"
+                monitor_name = model_name if model_name else f"Монитор {i + 1}"
                 
                 # Заголовок монитора с текущей яркостью
                 monitor_header = menu.addAction(f"📺 {monitor_name} (🔆 {current_brightness}%)")
                 monitor_header.setEnabled(False)
+                g_menu_items[monitor_key]["header"] = monitor_header
                 
                 # Показать текущий вход если известен
-                if current_input is not None:
-                    input_info = menu.addAction(f"   🔌 Текущий: {get_input_name(current_input)}")
-                    input_info.setEnabled(False)
+                input_info = menu.addAction(f"   🔌 Текущий: {get_input_name(current_input)}")
+                input_info.setEnabled(False)
+                g_menu_items[monitor_key]["input_info"] = input_info
+                if current_input is None:
+                    input_info.setVisible(False)
                 
                 # Inline кнопки яркости с эмодзи
                 brightness_emojis = ["🌑", "🌘", "🌗", "🌖", "🌕"]
                 brightness_values = [0, 25, 50, 75, 100]
-                brightness_line = "   "
                 for j, (emoji, brightness) in enumerate(zip(brightness_emojis, brightness_values)):
-                    if j == len(brightness_emojis) - 1:
-                        brightness_line += f"{emoji}"
-                    else:
-                        brightness_line += f"{emoji} "
-                    
                     action = menu.addAction(f"   {emoji} {brightness}%")
                     action.triggered.connect(lambda checked, mon=monitor, val=brightness, idx=i: set_monitor_brightness(mon, val, idx))
                 
@@ -671,11 +684,13 @@ def create_monitor_menus(menu, monitors):
                 # Доступные источники входа
                 if available_inputs:
                     menu.addAction("   🔌 Источники входа:").setEnabled(False)
+                    g_menu_items[monitor_key]["inputs"] = {}
                     for input_code in available_inputs:
                         input_name = get_input_name(input_code)
                         current_marker = " ◀" if input_code == current_input else ""
                         action = menu.addAction(f"     ▸ {input_name}{current_marker}")
                         action.triggered.connect(lambda checked, mon=monitor, code=input_code, idx=i: set_monitor_input(mon, code, idx))
+                        g_menu_items[monitor_key]["inputs"][input_code] = action
                 
                 # Разделитель между мониторами
                 if i < len(monitors) - 1:
@@ -803,13 +818,13 @@ def main():
     monitors_global = monitors
     print()
     
-    # Шаг 3: Создание system tray
-    print("3. Создаем system tray...")
+    # Шаг 3: Создание system tray и МЕНЮ (ОДИН РАЗ)
+    print("3. Создаем system tray и меню...")
     tray_icon = QSystemTrayIcon(create_monitor_icon(), app)
     tray_icon.setToolTip("Monitor Control - С анимацией и автообновлением")
     tray_icon_global = tray_icon
     
-    # Создаем начальное меню
+    # Создаем меню ОДИН РАЗ
     menu = QMenu()
     menu.setStyleSheet("""
         QMenu {
@@ -828,7 +843,7 @@ def main():
         }
     """)
     
-    # Создаем меню для мониторов
+    # Заполняем меню и сохраняем ссылки на его элементы
     create_monitor_menus(menu, monitors)
     
     # Служебные функции
@@ -847,7 +862,7 @@ def main():
     print("4. Настраиваем автоматическое обновление...")
     update_timer = QTimer()
     update_timer.timeout.connect(update_brightness_display)
-    update_timer.start(UPDATE_INTERVAL_MS)  # Обновление каждые 5 секунд
+    update_timer.start(UPDATE_INTERVAL_MS)
     print(f"✅ Автообновление настроено (каждые {UPDATE_INTERVAL_MS/1000} секунд)")
     
     print("✅ System tray создан и отображен")
