@@ -867,14 +867,6 @@ def main():
     
     print("✅ System tray создан и отображен")
     
-    # Показываем уведомление
-    tray_icon.showMessage(
-        "Monitor Control",
-        "Версия с анимацией и автообновлением запущена!",
-        QSystemTrayIcon.MessageIcon.Information,
-        3000
-    )
-    
     print()
     print("✅ Приложение запущено успешно!")
     print("📍 Проверьте системный трей для управления мониторами")
